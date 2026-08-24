@@ -8,7 +8,7 @@ st.title("🎵 SelfBeats AI")
 st.subheader("Create Your Own Copyright-Free Music for Reels & Shorts")
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
-API_URL = "https://api-inference.huggingface.co/models/facebook/musicgen-small"
+API_URL = "https://router.huggingface.co/hf-inference/models/facebook/musicgen-small"
 
 platform = st.radio("Select Platform", ["Instagram Reels", "YouTube Shorts"], horizontal=True)
 
