@@ -9,7 +9,7 @@ st.title("🎵 SelfBeats AI")
 st.subheader("Create Your Own Copyright-Free Music for Reels & Shorts")
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
-API_URL = "https://router.huggingface.co/hf-inference/models/facebook/musicgen-small"
+API_URL = "https://api-inference.huggingface.co/models/facebook/musicgen-small"
 
 platform = st.radio("Select Platform", ["Instagram Reels", "YouTube Shorts"], horizontal=True)
 
@@ -26,11 +26,12 @@ if st.button("🚀 Generate My Own Music", use_container_width=True):
         st.info("⚡ Generating Track... Initializing GPU...")
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
         prompt_text = f"A high quality {mood.lower()} {genre.lower()} background music track for {platform}. Catchy rhythm, loopable."
+        payload = {"inputs": prompt_text}
         
         success = False
         for attempt in range(5):
             try:
-                response = requests.post(API_URL, headers=headers, json={"inputs": prompt_text, "options": {"wait_for_model": True}}, timeout=120)
+                response = requests.post("https://api-inference.huggingface.co/models/facebook/musicgen-small", headers=headers, json=payload, timeout=120)
                 if response.status_code == 200:
                     audio_bytes = response.content
                     st.success("🎉 Music Generated Successfully!")
