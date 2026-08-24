@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import streamlit as st
 
@@ -22,24 +23,33 @@ if st.button("🚀 Generate My Own Music", use_container_width=True):
     if not HF_TOKEN:
         st.error("⚠️ Secrets mein 'HF_TOKEN' miss ho gaya hai!")
     else:
-        st.info("⚡ Generating Music... (Takes 15-30 seconds)")
+        st.info("⚡ Generating Track... Initializing GPU...")
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        prompt_text = f"A high quality {mood.lower()} {genre.lower()} background music track designed for {platform}. Catchy rhythm, loopable."
+        prompt_text = f"A high quality {mood.lower()} {genre.lower()} background music track for {platform}. Catchy rhythm, loopable."
         
-        try:
-            response = requests.post(API_URL, headers=headers, json={"inputs": prompt_text}, timeout=120)
-            if response.status_code == 200:
-                audio_bytes = response.content
-                st.success("🎉 Music Generated Successfully!")
-                st.audio(audio_bytes, format="audio/wav")
-                st.download_button(
-                    label="⬇️ Download Track (.wav)",
-                    data=audio_bytes,
-                    file_name=f"SelfBeats_{genre.replace(' ', '_')}.wav",
-                    mime="audio/wav",
-                    use_container_width=True
-                )
-            else:
-                st.warning("⚠️ Open-Source Model Warm-Up me hai. 10 sec baad dobara try karein.")
-        except Exception as e:
-            st.error(f"Error: {e}")
+        success = False
+        for attempt in range(5):
+            try:
+                response = requests.post(API_URL, headers=headers, json={"inputs": prompt_text, "options": {"wait_for_model": True}}, timeout=120)
+                if response.status_code == 200:
+                    audio_bytes = response.content
+                    st.success("🎉 Music Generated Successfully!")
+                    st.audio(audio_bytes, format="audio/wav")
+                    st.download_button(
+                        label="⬇️ Download Track (.wav)",
+                        data=audio_bytes,
+                        file_name=f"SelfBeats_{genre.replace(' ', '_')}.wav",
+                        mime="audio/wav",
+                        use_container_width=True
+                    )
+                    success = True
+                    break
+                elif response.status_code in [503, 500, 429]:
+                    st.warning(f"⏳ Model GPU par load ho raha hai... Retrying ({attempt+1}/5)... Wait karein.")
+                    time.sleep(12)
+                else:
+                    st.error(f"API Error {response.status_code}: {response.text}")
+                    break
+            except Exception as e:
+                st.error(f"Network Error: {e}")
+                break
