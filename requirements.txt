@@ -4,3 +4,5 @@ gradio_client
 huggingface_hub
 gTTS
 pydub
+scipy
+numpy
