@@ -18,49 +18,38 @@ with col1:
 with col2:
     mood = st.selectbox("Mood", ["Energetic", "Relaxing", "Motivational", "Aggressive", "Mysterious"])
 
-def generate_audio_with_fallback(prompt, token):
-    # Method 1: Hugging Face Inference API via requests (with wait_for_model)
-    headers = {"Authorization": f"Bearer {token}"}
-    urls = [
-        "https://router.huggingface.co/hf-inference/models/facebook/musicgen-small",
-        "https://api-inference.huggingface.co/models/facebook/musicgen-small"
-    ]
-    
-    for url in urls:
-        for attempt in range(3):
-            try:
-                response = requests.post(
-                    url, 
-                    headers=headers, 
-                    json={"inputs": prompt, "options": {"wait_for_model": True}}, 
-                    timeout=90
-                )
-                if response.status_code == 200 and len(response.content) > 1000:
-                    return response.content, None
-                elif response.status_code == 503:
-                    time.sleep(10) # Model loading GPU
-            except Exception:
-                pass
-    return None, "Server busy or endpoint unavailable. Please try again in a few seconds."
-
 if st.button("🚀 Generate My Own Music", use_container_width=True):
     if not HF_TOKEN:
-        st.error("⚠️ Secrets mein 'HF_TOKEN' miss ho gaya hai! Secrets check karein.")
+        st.error("⚠️ Secrets mein 'HF_TOKEN' missing hai!")
     else:
-        with st.spinner("⚡ Connecting to AI Engine... Generating track (20-30 seconds)..."):
-            prompt_text = f"A high quality {mood.lower()} {genre.lower()} background music track for {platform}. Catchy rhythm, heavy phonk beats."
+        with st.spinner("⚡ Synthesizing Beat & Rhythm... Please wait 15-25 seconds..."):
+            prompt_text = f"Phonk bass drop beat, high energy background music for {platform}, {genre}, {mood} style, instrumental 128bpm loop"
+            headers = {"Authorization": f"Bearer {HF_TOKEN}"}
             
-            audio_bytes, error_msg = generate_audio_with_fallback(prompt_text, HF_TOKEN)
-            
-            if audio_bytes:
+            audio_data = None
+            for model_url in MODELS:
+                try:
+                    res = requests.post(
+                        model_url,
+                        headers=headers,
+                        json={"inputs": prompt_text, "options": {"wait_for_model": True}},
+                        timeout=60
+                    )
+                    if res.status_code == 200 and len(res.content) > 5000:
+                        audio_data = res.content
+                        break
+                except Exception:
+                    continue
+
+            if audio_data:
                 st.success("🎉 Music Generated Successfully!")
-                st.audio(audio_bytes, format="audio/wav")
+                st.audio(audio_data, format="audio/wav")
                 st.download_button(
                     label="⬇️ Download Track (.wav)",
-                    data=audio_bytes,
+                    data=audio_data,
                     file_name=f"SelfBeats_{genre.replace(' ', '_')}.wav",
                     mime="audio/wav",
                     use_container_width=True
                 )
             else:
-                st.error(f"⚠️ {error_msg}")
+                st.error("⚠️ HuggingFace Free Tier is temporarily overloaded. Please tap 'Generate' once again in 10 seconds.")

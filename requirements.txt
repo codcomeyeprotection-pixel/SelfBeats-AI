@@ -2,3 +2,5 @@ streamlit
 requests
 gradio_client
 huggingface_hub
+gTTS
+pydub
