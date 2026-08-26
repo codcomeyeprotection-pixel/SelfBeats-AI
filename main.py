@@ -1,5 +1,4 @@
 import os
-import time
 import requests
 import streamlit as st
 
@@ -17,6 +16,12 @@ with col1:
     genre = st.selectbox("Music Style", ["Phonk Drop", "Lo-Fi Chill Beat", "Cinematic Hype", "Upbeat Vlog", "Dark Ambient"])
 with col2:
     mood = st.selectbox("Mood", ["Energetic", "Relaxing", "Motivational", "Aggressive", "Mysterious"])
+
+# Correctly defined MODELS array at top-level
+MODELS = [
+    "https://api-inference.huggingface.co/models/cvssp/audioldm-m-full",
+    "https://router.huggingface.co/hf-inference/models/cvssp/audioldm"
+]
 
 if st.button("🚀 Generate My Own Music", use_container_width=True):
     if not HF_TOKEN:
