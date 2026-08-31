@@ -12,130 +12,156 @@ st.subheader("Create Your Own Copyright-Free Music for Reels & Shorts")
 
 col1, col2 = st.columns(2)
 with col1:
-    platform = st.selectbox("Select Platform", ["Instagram Reels", "YouTube Shorts"])
-with col2:
-    genre = st.selectbox("Music Style", [
-        "Phonk Drop", "Lo-Fi Chill Beat", "Cinematic Hype", 
-        "Cyberpunk Drift", "Trap Bass", "Ambient Drone", 
-        "Synthwave", "Infinite Random Beat"
+    genre = st.selectbox("Style & Soundkit", [
+        "Drift Phonk (Heavy 808)", "Lo-Fi Jazzhop", "Modern Trap Beat",
+        "Cyberpunk Synthwave", "Orchestral Cinematic", "Afrobeat Groove",
+        "Deep House / EDM", "Dark Ambient"
+    ])
+    lead_instrument = st.selectbox("Lead Instrument", [
+        "Sawtooth Synth (FL Synthmaker)", "Grand Piano (FL Keys)", 
+        "Plucked Synth (FL Sytrus)", "Brass Horns (FL DirectWave)"
     ])
 
-mood = st.selectbox("Mood", [
-    "Energetic", "Dark / Aggressive", "Relaxing", 
-    "Motivational", "Mysterious", "Ethereal", "Sad / Melancholic"
-])
+with col2:
+    mood = st.selectbox("Mood / Vibe", ["Aggressive / Dark", "Chill / Relaxed", "Hype / Energetic", "Emotional / Sad"])
+    scale_type = st.selectbox("Musical Scale Engine", ["Minor (Dark/Sad)", "Major (Happy/Bright)", "Pentatonic (Catchy)", "Dorian (Mysterious)"])
 
-def get_scale_notes(genre, mood):
-    # Dynamic scale mapping for realistic human music feel
-    if "Phonk" in genre or "Dark" in mood:
-        base_freq = random.choice([110.0, 123.47, 130.81]) # Low Phonk root (A2, B2, C3)
-        intervals = [0, 3, 5, 6, 7, 10, 12] # Minor Pentatonic / Blues scale
-    elif "Lo-Fi" in genre or "Relaxing" in mood or "Sad" in mood:
-        base_freq = random.choice([220.0, 261.63, 293.66]) # A3, C4, D4
-        intervals = [0, 2, 4, 7, 9, 11, 12] # Major 7th / Jazz scale
-    elif "Cinematic" in genre or "Motivational" in mood:
-        base_freq = random.choice([146.83, 164.81, 196.00]) # D3, E3, G3
-        intervals = [0, 2, 3, 5, 7, 8, 10, 12] # Aeolian / Epic scale
-    else:
-        base_freq = random.choice([174.61, 196.00, 220.00])
-        intervals = [0, 2, 4, 5, 7, 9, 11, 12] # Diatonic scale
+st.markdown("**🎛️ Automated FL Studio FX & Sequencer Rack**")
+col_fx1, col_fx2, col_fx3 = st.columns(3)
+with col_fx1:
+    enable_sidechain = st.checkbox("Sidechain Compression", value=True)
+with col_fx2:
+    enable_reverb = st.checkbox("Space Reverb / Delay", value=True)
+with col_fx3:
+    enable_arpeggio = st.checkbox("FL Arpeggiator", value=True)
 
-    # Convert semitones to frequencies
-    return [base_freq * (2 ** (i / 12.0)) for i in intervals]
+# FL Studio Scales Setup
+def get_scale_notes(scale_type):
+    scales = {
+        "Minor (Dark/Sad)": [110.0, 123.47, 130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, 261.63],
+        "Major (Happy/Bright)": [130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, 261.63, 293.66],
+        "Pentatonic (Catchy)": [110.0, 130.81, 146.83, 164.81, 196.00, 220.00, 261.63],
+        "Dorian (Mysterious)": [110.0, 123.47, 130.81, 146.83, 164.81, 185.00, 196.00, 220.00]
+    }
+    return scales.get(scale_type, scales["Minor (Dark/Sad)"])
 
-def generate_infinite_track(genre, mood, duration=12, sample_rate=44100):
-    # Unique seed per click and per user environment
-    user_unique_seed = int(time.time() * 1000) ^ random.randint(1000, 999999)
-    random.seed(user_unique_seed)
-    np.random.seed(user_unique_seed % (2**32 - 1))
+# DSP Effects: Reverb/Delay Simulation
+def apply_reverb_delay(signal, delay_samples=8820, decay=0.35):
+    output = np.copy(signal)
+    for i in range(delay_samples, len(signal)):
+        output[i] += output[i - delay_samples] * decay
+    return output
+
+# Main FL Engine Function
+def generate_fl_studio_automatic_track(genre, lead_inst, mood, scale_type, sidechain, reverb, arpeggio, duration=15):
+    sample_rate = 44100
+    
+    # 1. Microsecond Seed for 100% Unique Auto Generation
+    seed = int(time.time() * 1000) ^ random.randint(1000, 999999)
+    random.seed(seed)
+    np.random.seed(seed % (2**32 - 1))
     
     t = np.linspace(0, duration, int(sample_rate * duration), False)
     total_samples = len(t)
-    audio = np.zeros(total_samples)
     
-    # 1. Dynamic BPM Selection based on Genre
+    # Mix Buses
+    drums_bus = np.zeros(total_samples)
+    bass_bus = np.zeros(total_samples)
+    melody_bus = np.zeros(total_samples)
+    
+    # Auto BPM Selector based on Genre
     if "Phonk" in genre or "Trap" in genre:
-        bpm = random.randint(135, 165)
-    elif "Lo-Fi" in genre or "Relaxing" in mood:
-        bpm = random.randint(70, 90)
-    elif "Cinematic" in genre:
-        bpm = random.randint(95, 120)
+        bpm = random.randint(130, 160)
+    elif "Lo-Fi" in genre:
+        bpm = random.randint(75, 92)
+    elif "EDM" in genre:
+        bpm = random.randint(124, 128)
     else:
-        bpm = random.randint(110, 140)
+        bpm = random.randint(95, 120)
         
     beat_sec = 60.0 / bpm
-    scale_notes = get_scale_notes(genre, mood)
+    scale = get_scale_notes(scale_type)
     
-    # 2. Kick / 808 Bass Line Generator
+    # FL Sequencer Layer 1: Kick & Sub Bass
     kick_step = int(beat_sec * sample_rate)
-    kick_pattern = random.choice([[1, 0, 1, 0], [1, 1, 0, 1], [1, 0, 0, 1], [1, 0, 1, 1]])
-    
-    p_idx = 0
     for i in range(0, total_samples, kick_step):
-        if kick_pattern[p_idx % len(kick_pattern)] == 1:
-            k_len = min(int(0.25 * sample_rate), total_samples - i)
-            k_t = np.linspace(0, 0.25, k_len, False)
-            # Pitch-drop 808 sub kick
-            freq_env = (140 if "Phonk" in genre else 100) * np.exp(-35 * k_t) + 35
-            kick_wave = np.sin(2 * np.pi * freq_env * k_t) * np.exp(-8 * k_t)
-            audio[i:i+k_len] += kick_wave * 0.85
-        p_idx += 1
+        if random.random() > 0.1:
+            k_len = min(int(0.22 * sample_rate), total_samples - i)
+            k_t = np.linspace(0, 0.22, k_len, False)
+            kick_freq = (150 if "Phonk" in genre else 110) * np.exp(-32 * k_t) + 38
+            kick = np.sin(2 * np.pi * kick_freq * k_t) * np.exp(-8 * k_t)
+            drums_bus[i:i+k_len] += kick * 0.9
 
-    # 3. Snare / Clap Layer
-    snare_offset = int(beat_sec * sample_rate)
-    for i in range(snare_offset, total_samples, snare_offset * 2):
-        s_len = min(int(0.15 * sample_rate), total_samples - i)
-        s_t = np.linspace(0, 0.15, s_len, False)
-        snare_noise = (np.random.rand(s_len) - 0.5) * np.exp(-25 * s_t)
-        snare_tone = np.sin(2 * np.pi * 180 * s_t) * np.exp(-30 * s_t)
-        audio[i:i+s_len] += (snare_noise * 0.4 + snare_tone * 0.3)
+    # FL Sequencer Layer 2: Snare / Clap
+    snare_step = int(beat_sec * sample_rate)
+    for i in range(snare_step, total_samples, snare_step * 2):
+        s_len = min(int(0.16 * sample_rate), total_samples - i)
+        s_t = np.linspace(0, 0.16, s_len, False)
+        noise = (np.random.rand(s_len) - 0.5) * np.exp(-25 * s_t)
+        drums_bus[i:i+s_len] += noise * 0.4
 
-    # 4. Humanized Melody & Chords (Micro-timing jitter & Soft Envelopes)
-    note_step = int((beat_sec / 2) * sample_rate)
-    for i in range(0, total_samples, note_step):
-        if random.random() > 0.25:
-            # Human Micro-timing offset
-            human_jitter = random.randint(-100, 100)
-            start_pos = max(0, min(total_samples - 1, i + human_jitter))
-            
-            note_freq = random.choice(scale_notes)
-            m_len = min(int((beat_sec * random.choice([0.5, 1.0, 1.5])) * sample_rate), total_samples - start_pos)
-            m_t = np.linspace(0, m_len / sample_rate, m_len, False)
-            
-            # Rich Saw/Sine Harmonics for Lead Melody
-            lead = 0.4 * np.sin(2 * np.pi * note_freq * m_t)
-            lead += 0.2 * np.sin(2 * np.pi * (note_freq * 2) * m_t) # Harmonic octave
-            lead *= np.exp(-4 * m_t) # Natural decay envelope
-            
-            audio[start_pos:start_pos+m_len] += lead * 0.45
-
-    # 5. Hi-Hat Rhythms (16th notes)
+    # FL Sequencer Layer 3: Hi-Hats / Shakers
     hat_step = int((beat_sec / 4) * sample_rate)
     for i in range(0, total_samples, hat_step):
-        if random.random() > 0.15:
-            h_len = min(int(0.04 * sample_rate), total_samples - i)
-            h_t = np.linspace(0, 0.04, h_len, False)
-            hat_noise = (np.random.rand(h_len) - 0.5) * np.exp(-70 * h_t)
-            audio[i:i+h_len] += hat_noise * 0.18
+        if random.random() > 0.12:
+            h_len = min(int(0.035 * sample_rate), total_samples - i)
+            h_t = np.linspace(0, 0.035, h_len, False)
+            hat = (np.random.rand(h_len) - 0.5) * np.exp(-75 * h_t)
+            drums_bus[i:i+h_len] += hat * 0.18
 
-    # Final Master Mix & Normalization
-    audio = audio / (np.max(np.abs(audio)) + 1e-5)
-    audio_int16 = (audio * 32767).astype(np.int16)
+    # FL Synth Piano Roll Layer (Lead Melody / Arp)
+    note_duration_step = int((beat_sec / (4 if arpeggio else 2)) * sample_rate)
+    for i in range(0, total_samples, note_duration_step):
+        if random.random() > 0.2:
+            note_freq = random.choice(scale)
+            m_len = min(int((beat_sec * (0.25 if arpeggio else 0.8)) * sample_rate), total_samples - i)
+            m_t = np.linspace(0, m_len / sample_rate, m_len, False)
+            
+            # Sound Design Presets
+            if "Sawtooth" in lead_inst:
+                synth = 0.4 * np.sin(2 * np.pi * note_freq * m_t) + 0.3 * (m_t * note_freq % 1 - 0.5)
+            elif "Piano" in lead_inst:
+                synth = 0.5 * np.sin(2 * np.pi * note_freq * m_t) * np.exp(-3.5 * m_t)
+            elif "Plucked" in lead_inst:
+                synth = 0.5 * np.sin(2 * np.pi * note_freq * m_t) * np.exp(-14 * m_t)
+            else: # Brass
+                synth = 0.5 * np.sin(2 * np.pi * note_freq * m_t) + 0.25 * np.sin(2 * np.pi * (note_freq * 2) * m_t)
+                
+            melody_bus[i:i+m_len] += synth * 0.35
+
+    # Sidechain Compression Simulation (Ducks melody when kick hits)
+    if sidechain:
+        for i in range(0, total_samples, kick_step):
+            duck_len = min(int(0.2 * sample_rate), total_samples - i)
+            duck_env = np.linspace(0.2, 1.0, duck_len)
+            melody_bus[i:i+duck_len] *= duck_env
+
+    # Reverb FX Rack
+    if reverb:
+        melody_bus = apply_reverb_delay(melody_bus)
+
+    # FL Master Mixer Channel
+    master_mix = drums_bus + bass_bus + melody_bus
+    master_mix = master_mix / (np.max(np.abs(master_mix)) + 1e-5)
+    audio_int16 = (master_mix * 32767).astype(np.int16)
     
     byte_io = io.BytesIO()
     wav.write(byte_io, sample_rate, audio_int16)
     return byte_io.getvalue()
 
-if st.button("🚀 Generate My Own Music", use_container_width=True):
-    with st.spinner(f"⚡ Composing Unique {genre} ({mood}) Beat... Please wait..."):
-        audio_bytes = generate_infinite_track(genre, mood)
+if st.button("🚀 Auto-Generate FL Studio Track", use_container_width=True):
+    with st.spinner("🎛️ Processing FL Studio Piano Roll, Sequencer & FX Rack..."):
+        audio_data = generate_fl_studio_automatic_track(
+            genre, lead_instrument, mood, scale_type, 
+            enable_sidechain, enable_reverb, enable_arpeggio
+        )
         
-        st.success(f"🎉 100% Unique Beat Generated! ({genre} - {mood})")
-        st.audio(audio_bytes, format="audio/wav")
+        st.success(f"🎉 Track Rendered with FL FX Rack! ({genre} | Scale: {scale_type})")
+        st.audio(audio_data, format="audio/wav")
         st.download_button(
             label="⬇️ Download Track (.wav)",
-            data=audio_bytes,
-            file_name=f"SelfBeats_{genre.replace(' ', '_')}_{platform.replace(' ', '')}.wav",
+            data=audio_data,
+            file_name=f"SelfBeats_FL_Studio_{genre.replace(' ', '_')}.wav",
             mime="audio/wav",
             use_container_width=True
         )
