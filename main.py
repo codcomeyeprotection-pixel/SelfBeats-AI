@@ -1,7 +1,12 @@
 import io, time, random, numpy as np, scipy.io.wavfile as wav, scipy.signal as signal, streamlit as st
 
-st.set_page_config(page_title="SelfBeats AI Mega DAW", page_icon="🎛️", layout="wide")
-st.title("🎛️ SelfBeats AI - Mega Studio DAW")
+st.set_page_config(page_title="SelfBeats AI Mega DAW", page_icon="logo.png", layout="wide")
+
+logo_col, title_col = st.columns([1, 8])
+with logo_col:
+    st.image("logo.png", width=100)
+with title_col:
+    st.title("SelfBeats AI - Ultimate Mega Studio")
 
 mode = st.radio("Select Workflow:", ["⚡ 1-Click Auto", "🎼 Pure Instruments Only", "🎛️ Full Hardware Rack (Step-by-Step)"], horizontal=True)
 
