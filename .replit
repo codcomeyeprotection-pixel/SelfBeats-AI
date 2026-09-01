@@ -1,49 +1,9 @@
-modules = ["python-3.11"]
+entrypoint = "main.py"
 run = "streamlit run main.py --server.port 5000 --server.address 0.0.0.0"
-
-[[ports]]
-localPort = 5000
-externalPort = 80
+modules = ["python-3.11"]
 
 [deployment]
-router = "application"
-deploymentTarget = "autoscale"
-
-[deployment.postBuild]
-args = ["pnpm", "store", "prune"]
-env = { "CI" = "true" }
-
-[workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "SelfBeats AI"
-
-[[workflows.workflow]]
-name = "SelfBeats AI"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "streamlit run main.py --server.port 5000 --server.address 0.0.0.0 --server.headless true"
-waitForPort = 5000
-
-[agent]
-stack = "PYTHON"
-expertMode = true
-
-[postMerge]
-path = "scripts/post-merge.sh"
-timeoutMs = 20000
+run = ["sh", "-c", "streamlit run main.py --server.port 5000 --server.address 0.0.0.0"]
 
 [nix]
 channel = "stable-25_05"

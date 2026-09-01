@@ -6,3 +6,6 @@ gTTS
 pydub
 scipy
 numpy
+numpy
+scipy
+streamlit
