@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "2A_S1FxvptyW4pBvCQf4W"
+uri = "file://project.zip"
+type = "unspecified"
+title = "SelfBeats AI Project Archive"
+description = "Complete project archive including main.py, requirements.txt, configuration files, source directories, logo assets, and attached assets. Generated dependencies and workspace caches are excluded."
+logical_id = "050ccccf-ff67-409d-9839-cda49dfebbb6"
+content_hash = "sha256:2ed64af6d26fe1777683941defbd0f367ec17beaa49f83b406fca3a2dde14552"
+size = 5036819
+mtime_ms = 1788252013392
+storage_uri = "gcs://replit-rams-assets-pike/rams/assets/repl:ac600a59-d71c-483a-aca0-ea45f57e0e0b/050ccccf-ff67-409d-9839-cda49dfebbb6/995f18b6-78a0-4f04-857b-680cfa446880"
+storage_version_token = "1788252035373936"
+content_type = "application/octet-stream"
