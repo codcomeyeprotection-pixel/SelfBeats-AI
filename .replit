@@ -1,10 +1,10 @@
 entrypoint = "main.py"
 run = "streamlit run main.py --server.port 5000 --server.address 0.0.0.0"
 modules = ["python-3.11"]
+deploymentTarget = "cloudrun"
 
 [deployment]
 run = ["sh", "-c", "streamlit run main.py --server.port 5000 --server.address 0.0.0.0"]
-build = ["sh", "-c", "echo 'No build required'"]
 
 [nix]
 channel = "stable-25_05"
