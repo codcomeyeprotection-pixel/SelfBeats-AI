@@ -1,6 +1,9 @@
 import io, time, random, numpy as np, scipy.io.wavfile as wav, scipy.signal as signal, streamlit as st
 
-st.set_page_config(page_title="SelfBeats AI Mega DAW", page_icon="logo.png", layout="wide")
+st.set_page_config(page_title="SelfBeats AI", page_icon="logo.png", layout="wide")
+
+STANDARD_SAMPLE_RATE = 44100
+AUDIO_BUFFER_SIZE = 32768
 
 logo_col, title_col = st.columns([1, 8])
 with logo_col:
@@ -54,24 +57,75 @@ elif mode == "🎛️ Full Hardware Rack (Step-by-Step)":
                         target_list.append(item)
 
 
-def lowpass_filter(data, cutoff=3200, fs=44100):
+def lowpass_filter(data, cutoff=3200, fs=STANDARD_SAMPLE_RATE):
     nyq = 0.5 * fs
     normal_cutoff = min(cutoff / nyq, 0.98)
     b, a = signal.butter(2, normal_cutoff, btype="low", analog=False)
-    return signal.lfilter(b, a, data)
+    return np.asarray(signal.lfilter(b, a, data), dtype=np.float32)
 
 
-def body_reverb(data, delay_ms=35, decay=0.28):
-    delay_samples = int((delay_ms / 1000.0) * 44100)
-    output = np.copy(data)
-    for i in range(delay_samples, len(data)):
-        output[i] += output[i - delay_samples] * decay
+def body_reverb(data, delay_ms=35, decay=0.28, fs=STANDARD_SAMPLE_RATE):
+    delay_samples = max(1, int((delay_ms / 1000.0) * fs))
+    output = np.array(data, dtype=np.float32, copy=True)
+    for buffer_start in range(0, len(data), AUDIO_BUFFER_SIZE):
+        buffer_end = min(buffer_start + AUDIO_BUFFER_SIZE, len(data))
+        first_sample = max(delay_samples, buffer_start)
+        for i in range(first_sample, buffer_end):
+            output[i] += np.float32(output[i - delay_samples] * decay)
     return output
 
 
-def synthesize_hifi_sound(inst, freq, length_sec, fs=44100):
-    n_samples = int(length_sec * fs)
-    t = np.linspace(0, length_sec, n_samples, False)
+def smooth_adsr(
+    n_samples,
+    fs=STANDARD_SAMPLE_RATE,
+    attack_sec=0.04,
+    decay_sec=0.08,
+    sustain_level=0.82,
+    release_sec=0.14,
+):
+    """Create a click-safe ADSR envelope with eased attack and release."""
+    envelope = np.ones(n_samples, dtype=np.float32) * np.float32(sustain_level)
+    attack_samples = min(max(1, int(attack_sec * fs)), n_samples)
+    decay_samples = min(max(1, int(decay_sec * fs)), max(0, n_samples - attack_samples))
+    release_samples = min(
+        max(1, int(release_sec * fs)),
+        max(0, n_samples - attack_samples - decay_samples),
+    )
+
+    if attack_samples:
+        attack_phase = np.linspace(0.0, np.pi / 2, attack_samples, dtype=np.float32)
+        envelope[:attack_samples] = np.sin(attack_phase) ** 2
+
+    decay_start = attack_samples
+    decay_end = decay_start + decay_samples
+    if decay_samples:
+        decay_phase = np.linspace(0.0, np.pi / 2, decay_samples, dtype=np.float32)
+        envelope[decay_start:decay_end] = (
+            1.0 - (1.0 - sustain_level) * np.sin(decay_phase) ** 2
+        )
+
+    if release_samples:
+        release_start = n_samples - release_samples
+        release_phase = np.linspace(0.0, np.pi / 2, release_samples, dtype=np.float32)
+        envelope[release_start:] = np.float32(sustain_level) * np.cos(release_phase) ** 2
+
+    envelope[0] = 0.0
+    envelope[-1] = 0.0
+    return envelope
+
+
+def soft_limiter(data, threshold=0.88, drive=1.15):
+    """Gently compress peaks while keeping the output bounded and musical."""
+    data = np.asarray(data, dtype=np.float32)
+    threshold = np.float32(threshold)
+    limited = threshold * np.tanh((data / threshold) * np.float32(drive))
+    limited /= np.tanh(np.float32(drive))
+    return np.asarray(limited, dtype=np.float32)
+
+
+def synthesize_hifi_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
+    n_samples = max(1, int(length_sec * fs))
+    t = np.arange(n_samples, dtype=np.float32) / np.float32(fs)
 
     if any(
         w in inst
@@ -85,35 +139,37 @@ def synthesize_hifi_sound(inst, freq, length_sec, fs=44100):
             "Accordion",
         ]
     ):
-        vibrato = 1.0 + 0.009 * np.sin(2 * np.pi * 5.5 * t)
-        breath = (np.random.rand(n_samples) - 0.5) * 0.06
-        core = np.sin(2 * np.pi * freq * vibrato * t) + 0.3 * np.sin(
-            2 * np.pi * (freq * 2) * t
+        vibrato = 1.0 + np.float32(0.009) * np.sin(2 * np.pi * 5.5 * t)
+        breath = (np.random.rand(n_samples).astype(np.float32) - 0.5) * np.float32(0.06)
+        phase = np.cumsum(np.float32(freq) * vibrato) / np.float32(fs)
+        core = np.sin(2 * np.pi * phase) + np.float32(0.3) * np.sin(
+            2 * np.pi * 2 * phase
         )
-        env = (1 - np.exp(-12 * t)) * np.exp(-2.2 * t)
-        return lowpass_filter((core + breath) * env, cutoff=4200)
+        env = smooth_adsr(n_samples, fs, attack_sec=0.035, decay_sec=0.09, sustain_level=0.76, release_sec=0.16)
+        return lowpass_filter((core + breath) * env, cutoff=4200, fs=fs)
 
     elif any(p in inst for p in ["Tabla", "Dholak", "Cajón", "Bongos", "Congas"]):
-        pitch_drop = freq * np.exp(-32 * t) + (freq * 0.35)
+        pitch_drop = np.float32(freq) * np.exp(-32 * t) + (np.float32(freq) * 0.35)
         base = np.sin(2 * np.pi * pitch_drop * t) * np.exp(-10 * t)
-        slap = (np.random.rand(n_samples) - 0.5) * np.exp(-55 * t) * 0.25
-        return lowpass_filter(base + slap, cutoff=1900)
+        slap = (np.random.rand(n_samples).astype(np.float32) - 0.5) * np.exp(-55 * t) * 0.25
+        return lowpass_filter(base + slap, cutoff=1900, fs=fs)
 
     elif any(g in inst for g in ["Guitar", "Ukulele", "Sitar"]):
         period = int(fs / max(freq, 50))
-        buf = np.random.uniform(-1, 1, period)
-        sound = np.zeros(n_samples)
+        buf = np.random.uniform(-1, 1, period).astype(np.float32)
+        sound = np.zeros(n_samples, dtype=np.float32)
         for i in range(n_samples):
             sound[i] = buf[0]
-            avg = 0.5 * (buf[0] + buf[1]) * 0.982
+            avg = np.float32(0.5 * (buf[0] + buf[1]) * 0.982)
             buf = np.append(buf[1:], avg)
         return sound
 
     elif any(s in inst for s in ["Violin", "Viola", "Cello", "Double Bass"]):
-        vibrato = 1.0 + 0.012 * np.sin(2 * np.pi * 6 * t)
-        saw = 2 * (t * freq * vibrato % 1) - 1
-        bow_env = (1 - np.exp(-4 * t)) * np.exp(-1.2 * t)
-        return lowpass_filter(saw * bow_env, cutoff=2900)
+        vibrato = 1.0 + np.float32(0.012) * np.sin(2 * np.pi * 6 * t)
+        phase = np.cumsum(np.float32(freq) * vibrato) / np.float32(fs)
+        saw = np.float32(2.0) * (phase % np.float32(1.0)) - np.float32(1.0)
+        bow_env = smooth_adsr(n_samples, fs, attack_sec=0.055, decay_sec=0.12, sustain_level=0.84, release_sec=0.2)
+        return lowpass_filter(saw * bow_env, cutoff=2900, fs=fs)
 
     elif any(k in inst for k in ["Piano", "Keyboard"]):
         harmonics = (
@@ -121,7 +177,7 @@ def synthesize_hifi_sound(inst, freq, length_sec, fs=44100):
             + 0.45 * np.sin(2 * np.pi * freq * 2 * t) * np.exp(-4.5 * t)
             + 0.2 * np.sin(2 * np.pi * freq * 3 * t) * np.exp(-7.0 * t)
         )
-        return harmonics
+        return np.asarray(harmonics, dtype=np.float32)
 
     elif any(
         d in inst
@@ -141,7 +197,7 @@ def synthesize_hifi_sound(inst, freq, length_sec, fs=44100):
         if "Kick" in inst:
             return np.sin(
                 2 * np.pi * (140 * np.exp(-38 * t) + 38) * t
-            ) * np.exp(-7 * t)
+            ).astype(np.float32) * np.exp(-7 * t)
         else:
             decay = (
                 75
@@ -151,20 +207,20 @@ def synthesize_hifi_sound(inst, freq, length_sec, fs=44100):
                 )
                 else 25
             )
-            return (np.random.rand(n_samples) - 0.5) * np.exp(-decay * t)
+            return (np.random.rand(n_samples).astype(np.float32) - 0.5) * np.exp(-decay * t)
 
     else:
-        return np.sin(2 * np.pi * freq * t) * np.exp(-3.5 * t)
+        return np.asarray(np.sin(2 * np.pi * freq * t) * np.exp(-3.5 * t), dtype=np.float32)
 
 
 def generate_track(inst_list, fx_list, is_auto=False, duration=15):
-    fs = 44100
+    fs = STANDARD_SAMPLE_RATE
     seed = int(time.time() * 1000) ^ random.randint(1000, 999999)
     random.seed(seed)
     np.random.seed(seed % (2**32 - 1))
 
     total_samples = int(duration * fs)
-    master = np.zeros(total_samples)
+    master = np.zeros(total_samples, dtype=np.float32)
 
     scale = [130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, 261.63]
     bpm = random.randint(88, 128)
@@ -174,7 +230,7 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
         inst_list = random.sample(pure_instruments, k=random.randint(3, 6))
 
     for inst in inst_list:
-        layer = np.zeros(total_samples)
+        layer = np.zeros(total_samples, dtype=np.float32)
         step = int(
             (
                 beat_sec
@@ -198,11 +254,15 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
         f in fx_list
         for f in ["Distortion Pedal", "Overdrive Pedal", "Fuzz Pedal", "Saturation Unit"]
     ):
-        master = np.clip(master * 1.7, -0.75, 0.75)
+        master = np.clip(master * np.float32(1.7), -0.75, 0.75).astype(np.float32)
 
-    master = body_reverb(master)
-    master = master / (np.max(np.abs(master)) + 1e-5)
-    audio_int16 = (master * 32767).astype(np.int16)
+    master = body_reverb(master, fs=fs)
+    master = soft_limiter(master)
+    peak = np.max(np.abs(master))
+    if peak > 0:
+        master = (master / np.float32(peak)) * np.float32(0.97)
+    master = np.clip(master, -1.0, 1.0).astype(np.float32)
+    audio_int16 = np.round(master * np.float32(32767)).astype(np.int16)
 
     byte_io = io.BytesIO()
     wav.write(byte_io, fs, audio_int16)
