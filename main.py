@@ -17,9 +17,9 @@ INTERNAL_DTYPE = np.float64
 MIN_ENVELOPE_TIME_SEC = 0.005
 MASTER_HEADROOM_DB = -3.0
 MASTER_HEADROOM_GAIN = np.float64(10 ** (MASTER_HEADROOM_DB / 20.0))
-MASTER_LIMITER_DBFS = -0.5
+MASTER_LIMITER_DBFS = -1.0
 MASTER_LIMITER_THRESHOLD = np.float64(10 ** (MASTER_LIMITER_DBFS / 20.0))
-MASTER_TARGET_DBFS = -0.3
+MASTER_TARGET_DBFS = -1.0
 MASTER_TARGET_PEAK = np.float64(10 ** (MASTER_TARGET_DBFS / 20.0))
 
 logo_col, title_col = st.columns([1, 8])
@@ -84,13 +84,18 @@ def lowpass_filter(data, cutoff=3200, fs=STANDARD_SAMPLE_RATE):
     )
 
 
-def band_limit_filter(data, fs=STANDARD_SAMPLE_RATE):
+def band_limit_filter(
+    data,
+    fs=STANDARD_SAMPLE_RATE,
+    low_cutoff=20.0,
+    high_cutoff=18000.0,
+):
     """Remove subsonic and harsh digital frequencies on every audio path."""
     data = np.asarray(data, dtype=INTERNAL_DTYPE)
     if len(data) < 8:
         return data
-    highpass = signal.butter(6, 20.0, btype="highpass", fs=fs, output="sos")
-    lowpass = signal.butter(6, 18000.0, btype="lowpass", fs=fs, output="sos")
+    highpass = signal.butter(6, low_cutoff, btype="highpass", fs=fs, output="sos")
+    lowpass = signal.butter(6, high_cutoff, btype="lowpass", fs=fs, output="sos")
     filtered = signal.sosfilt(highpass, data)
     filtered = signal.sosfilt(lowpass, filtered)
     return np.asarray(filtered, dtype=INTERNAL_DTYPE)
@@ -350,7 +355,8 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
     np.random.seed(seed % (2**32 - 1))
 
     total_samples = int(duration * fs)
-    master = np.zeros(total_samples, dtype=INTERNAL_DTYPE)
+    total_signal = np.zeros(total_samples, dtype=INTERNAL_DTYPE)
+    number_of_active_instruments = 0
 
     scale = [130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, 261.63]
     bpm = random.randint(88, 128)
@@ -378,21 +384,42 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
                 avail = min(len(sound), total_samples - i)
                 layer[i : i + avail] += sound[:avail] * INTERNAL_DTYPE(0.35)
 
-        master += layer
+        if np.any(np.abs(layer) > 0.0):
+            total_signal += layer
+            number_of_active_instruments += 1
 
-    # Gain-stage the complete mix before any nonlinear processing.
-    master *= MASTER_HEADROOM_GAIN
+    # Reduce summed energy as channels are added to preserve dynamic headroom.
+    channel_attenuation = max(
+        1.0,
+        np.sqrt(INTERNAL_DTYPE(number_of_active_instruments)) * INTERNAL_DTYPE(1.5),
+    )
+    master_signal = total_signal / channel_attenuation
+    master_signal *= MASTER_HEADROOM_GAIN
 
     if any(
         f in fx_list
         for f in ["Distortion Pedal", "Overdrive Pedal", "Fuzz Pedal", "Saturation Unit"]
     ):
-        master = soft_limiter(master * INTERNAL_DTYPE(1.7), threshold=0.75, drive=1.1)
+        master_signal = soft_limiter(
+            master_signal * INTERNAL_DTYPE(1.7),
+            threshold=0.75,
+            drive=1.1,
+        )
 
-    master = body_reverb(master, fs=fs)
-    master = band_limit_filter(master, fs=fs)
-    master = soft_limiter(master, threshold=MASTER_LIMITER_THRESHOLD, drive=1.1)
-    master = normalize_master(master)
+    master_signal = body_reverb(master_signal, fs=fs)
+    master_signal = band_limit_filter(
+        master_signal,
+        fs=fs,
+        low_cutoff=35.0,
+        high_cutoff=15000.0,
+    )
+    master_signal = np.tanh(np.asarray(master_signal, dtype=INTERNAL_DTYPE))
+    master = soft_limiter(
+        master_signal,
+        threshold=MASTER_LIMITER_THRESHOLD,
+        drive=1.0,
+    )
+    master = normalize_master(master, target_peak=MASTER_LIMITER_THRESHOLD)
     byte_io = io.BytesIO()
     sf.write(byte_io, master, fs, format="WAV", subtype="PCM_16")
     return byte_io.getvalue(), inst_list
