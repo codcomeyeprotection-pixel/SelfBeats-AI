@@ -17,8 +17,13 @@ INTERNAL_DTYPE = np.float64
 MIN_ENVELOPE_TIME_SEC = 0.005
 MASTER_HEADROOM_DB = -3.0
 MASTER_HEADROOM_GAIN = np.float64(10 ** (MASTER_HEADROOM_DB / 20.0))
-MASTER_LIMITER_DBFS = -1.5
+MASTER_GAIN_DB = 4.0
+MASTER_GAIN = np.float64(10 ** (MASTER_GAIN_DB / 20.0))
+MASTER_LIMITER_DBFS = -0.3
 MASTER_LIMITER_THRESHOLD = np.float64(10 ** (MASTER_LIMITER_DBFS / 20.0))
+MASTER_OUTPUT_DBFS = -0.1
+MASTER_OUTPUT_PEAK = np.float64(10 ** (MASTER_OUTPUT_DBFS / 20.0))
+PRESENCE_BOOST_DB = 1.5
 
 BEAT_STYLES = [
     "Hip-Hop / Trap",
@@ -234,6 +239,29 @@ def band_limit_filter(
     return np.asarray(filtered, dtype=INTERNAL_DTYPE)
 
 
+def presence_boost(
+    data,
+    fs=STANDARD_SAMPLE_RATE,
+    low_cutoff=2500.0,
+    high_cutoff=5000.0,
+    gain_db=PRESENCE_BOOST_DB,
+):
+    """Add a restrained presence-band lift for melody and vocal-like detail."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    if len(data) < 8:
+        return data
+    presence_filter = signal.butter(
+        2,
+        [low_cutoff, high_cutoff],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+    presence_band = signal.sosfilt(presence_filter, data)
+    linear_boost = INTERNAL_DTYPE(10 ** (gain_db / 20.0) - 1.0)
+    return np.asarray(data + presence_band * linear_boost, dtype=INTERNAL_DTYPE)
+
+
 def body_reverb(data, delay_ms=35, decay=0.28, fs=STANDARD_SAMPLE_RATE):
     delay_samples = max(1, int((delay_ms / 1000.0) * fs))
     output = np.array(data, dtype=INTERNAL_DTYPE, copy=True)
@@ -302,6 +330,65 @@ def soft_limiter(data, threshold=MASTER_LIMITER_THRESHOLD, drive=1.25):
     return np.clip(limited, -threshold, threshold).astype(INTERNAL_DTYPE)
 
 
+def soft_knee_saturator(
+    data,
+    threshold=MASTER_LIMITER_THRESHOLD,
+    drive=1.15,
+):
+    """Smoothly round peaks around the -0.3 dBFS saturation threshold."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    threshold = INTERNAL_DTYPE(threshold)
+    drive = INTERNAL_DTYPE(drive)
+    saturated = threshold * np.tanh((data / threshold) * drive)
+    saturated /= np.tanh(drive)
+    return np.asarray(saturated, dtype=INTERNAL_DTYPE)
+
+
+def transparent_peak_limiter(data, ceiling=MASTER_OUTPUT_PEAK):
+    """Attenuate overs transparently without adding gain or hard edge clipping."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    ceiling = INTERNAL_DTYPE(ceiling)
+    peak = np.max(np.abs(data)) if data.size else INTERNAL_DTYPE(0.0)
+    if peak > ceiling:
+        data = data * (ceiling / peak)
+    return np.clip(data, -ceiling, ceiling).astype(INTERNAL_DTYPE)
+
+
+def multiband_peak_limiter(
+    data,
+    fs=STANDARD_SAMPLE_RATE,
+    ceiling=MASTER_LIMITER_THRESHOLD,
+):
+    """Limit low, presence, and high bands separately before the final guard."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    if len(data) < 8:
+        return data
+    low_band = signal.butter(4, 180.0, btype="lowpass", fs=fs, output="sos")
+    presence_band = signal.butter(
+        4,
+        [180.0, 5000.0],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+    high_band = signal.butter(4, 5000.0, btype="highpass", fs=fs, output="sos")
+    bands = (
+        signal.sosfilt(low_band, data),
+        signal.sosfilt(presence_band, data),
+        signal.sosfilt(high_band, data),
+    )
+    limited_bands = [
+        transparent_peak_limiter(band, ceiling=ceiling)
+        for band in bands
+    ]
+    summed = np.sum(
+        np.asarray(limited_bands, dtype=INTERNAL_DTYPE),
+        axis=0,
+        dtype=INTERNAL_DTYPE,
+    )
+    return transparent_peak_limiter(summed, ceiling=ceiling)
+
+
 def measure_signal(data):
     """Return float64 RMS and peak measurements without changing the signal."""
     data = np.asarray(data, dtype=INTERNAL_DTYPE)
@@ -312,13 +399,14 @@ def measure_signal(data):
     return INTERNAL_DTYPE(rms), INTERNAL_DTYPE(peak)
 
 
-def peak_guard(data, ceiling=MASTER_LIMITER_THRESHOLD):
-    """Only attenuate peaks above the ceiling; never add makeup gain."""
+def peak_normalize(data, target_peak=MASTER_OUTPUT_PEAK):
+    """Normalize a protected master to the requested final dBFS peak."""
     data = np.asarray(data, dtype=INTERNAL_DTYPE)
     peak = np.max(np.abs(data)) if data.size else INTERNAL_DTYPE(0.0)
-    if peak > ceiling:
-        data = data * (INTERNAL_DTYPE(ceiling) / INTERNAL_DTYPE(peak))
-    return np.clip(data, -ceiling, ceiling).astype(INTERNAL_DTYPE)
+    if peak <= 0.0:
+        return data
+    normalized = data * (INTERNAL_DTYPE(target_peak) / peak)
+    return np.clip(normalized, -1.0, 1.0).astype(INTERNAL_DTYPE)
 
 
 def wav_to_mp3(wav_bytes, bitrate="320k"):
@@ -802,7 +890,7 @@ def generate_track(
         / active_track_divisor
         / max(rms_guard, peak_guard_scale)
     )
-    master_signal *= MASTER_HEADROOM_GAIN
+    master_signal *= MASTER_HEADROOM_GAIN * MASTER_GAIN
 
     if any(
         f in fx_list
@@ -819,18 +907,37 @@ def generate_track(
         master_signal,
         fs=fs,
         low_cutoff=30.0,
-        high_cutoff=14000.0,
+        high_cutoff=16000.0,
     )
-    master_signal = np.tanh(
-        np.asarray(master_signal, dtype=INTERNAL_DTYPE) * INTERNAL_DTYPE(0.8)
+    master_signal = presence_boost(
+        master_signal,
+        fs=fs,
+        low_cutoff=2500.0,
+        high_cutoff=5000.0,
+        gain_db=PRESENCE_BOOST_DB,
+    )
+    master_signal = multiband_peak_limiter(
+        master_signal,
+        fs=fs,
+        ceiling=MASTER_LIMITER_THRESHOLD,
+    )
+    master_signal = soft_knee_saturator(
+        master_signal,
+        threshold=MASTER_LIMITER_THRESHOLD,
+        drive=1.15,
     )
     master_signal = band_limit_filter(
         master_signal,
         fs=fs,
         low_cutoff=30.0,
-        high_cutoff=14000.0,
+        high_cutoff=16000.0,
     )
-    master = peak_guard(master_signal, ceiling=MASTER_LIMITER_THRESHOLD)
+    master = transparent_peak_limiter(
+        master_signal,
+        ceiling=MASTER_OUTPUT_PEAK,
+    )
+    master = peak_normalize(master, target_peak=MASTER_OUTPUT_PEAK)
+    master = transparent_peak_limiter(master, ceiling=MASTER_OUTPUT_PEAK)
     byte_io = io.BytesIO()
     sf.write(byte_io, master, fs, format="WAV", subtype="PCM_16")
     return byte_io.getvalue(), list(rendered_layers)
