@@ -33,11 +33,37 @@ BEAT_STYLES = [
     "Modern Pop / R&B",
 ]
 SCALE_INTERVALS = {
+    "Major": (0, 2, 4, 5, 7, 9, 11),
     "Minor": (0, 2, 3, 5, 7, 8, 10),
+    "Harmonic Minor": (0, 2, 3, 5, 7, 8, 11),
     "Pentatonic": (0, 3, 5, 7, 10),
     "Dorian": (0, 2, 3, 5, 7, 9, 10),
     "Phrygian": (0, 1, 3, 5, 7, 8, 10),
 }
+CHORD_PROGRESSIONS = {
+    "Major": (
+        ("I–V–vi–IV", (0, 4, 5, 3)),
+        ("ii–V–I–vi", (1, 4, 0, 5)),
+        ("vi–IV–I–V", (5, 3, 0, 4)),
+    ),
+    "Minor": (
+        ("i–VI–III–VII", (0, 5, 2, 6)),
+        ("iiø–V–i–VI", (1, 4, 0, 5)),
+        ("i–iv–VII–III", (0, 3, 6, 2)),
+    ),
+}
+MELODY_MOTIFS = (
+    (0, 2, 4, 2, 1, 2, 4, 5),
+    (0, 0, 2, 4, 2, 1, 0, 2),
+    (4, 2, 1, 0, 2, 4, 5, 4),
+    (0, 2, 1, 4, 2, 0, 1, 2),
+)
+RESPONSE_MOTIFS = (
+    (4, 2, 0, 2),
+    (2, 1, 0, 1),
+    (5, 4, 2, 0),
+    (0, 2, 4, 2),
+)
 
 
 def _step_pattern(*steps):
@@ -50,7 +76,7 @@ BEAT_STYLE_PROFILES = {
     "Hip-Hop / Trap": {
         "bpm_range": (120, 160),
         "swing": 0.08,
-        "scales": ("Minor", "Pentatonic", "Phrygian"),
+        "scales": ("Minor", "Harmonic Minor", "Pentatonic", "Phrygian"),
         "melody_instruments": ("Bell Pluck", "Lead Synth"),
         "patterns": (
             {
@@ -72,7 +98,7 @@ BEAT_STYLE_PROFILES = {
     "Modern Drill": {
         "bpm_range": (135, 155),
         "swing": 0.16,
-        "scales": ("Minor", "Phrygian", "Dorian"),
+        "scales": ("Minor", "Harmonic Minor", "Phrygian", "Dorian"),
         "melody_instruments": ("Pluck Synth", "Bell Pluck", "Lead Synth"),
         "patterns": (
             {
@@ -94,7 +120,7 @@ BEAT_STYLE_PROFILES = {
     "Boom Bap": {
         "bpm_range": (82, 102),
         "swing": 0.2,
-        "scales": ("Minor", "Dorian", "Pentatonic"),
+        "scales": ("Minor", "Major", "Dorian", "Pentatonic"),
         "melody_instruments": ("Piano", "Electric Piano", "Sampler"),
         "patterns": (
             {
@@ -116,7 +142,7 @@ BEAT_STYLE_PROFILES = {
     "Lofi Beats": {
         "bpm_range": (70, 92),
         "swing": 0.24,
-        "scales": ("Pentatonic", "Minor", "Dorian"),
+        "scales": ("Pentatonic", "Minor", "Major", "Dorian"),
         "melody_instruments": ("Electric Piano", "Bell Pluck", "Piano"),
         "patterns": (
             {
@@ -138,7 +164,7 @@ BEAT_STYLE_PROFILES = {
     "Modern Pop / R&B": {
         "bpm_range": (96, 132),
         "swing": 0.1,
-        "scales": ("Minor", "Dorian", "Pentatonic"),
+        "scales": ("Major", "Minor", "Dorian", "Pentatonic"),
         "melody_instruments": ("Lead Synth", "Digital Piano", "Pluck Synth"),
         "patterns": (
             {
@@ -222,6 +248,33 @@ def lowpass_filter(data, cutoff=3200, fs=STANDARD_SAMPLE_RATE):
     )
 
 
+def resonant_lowpass_filter(
+    data,
+    cutoff=7200.0,
+    resonance=0.12,
+    fs=STANDARD_SAMPLE_RATE,
+):
+    """Low-pass an organic voice while retaining a restrained filter resonance."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    if len(data) < 8:
+        return data
+    cutoff = min(float(cutoff), fs * 0.45)
+    lowpass = signal.butter(2, cutoff, btype="lowpass", fs=fs, output="sos")
+    resonant_band = signal.butter(
+        2,
+        [max(80.0, cutoff * 0.72), cutoff * 0.98],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+    filtered = signal.sosfilt(lowpass, data)
+    resonance_signal = signal.sosfilt(resonant_band, data)
+    return np.asarray(
+        filtered + resonance_signal * INTERNAL_DTYPE(resonance),
+        dtype=INTERNAL_DTYPE,
+    )
+
+
 def band_limit_filter(
     data,
     fs=STANDARD_SAMPLE_RATE,
@@ -271,6 +324,43 @@ def body_reverb(data, delay_ms=35, decay=0.28, fs=STANDARD_SAMPLE_RATE):
         for i in range(first_sample, buffer_end):
             output[i] += INTERNAL_DTYPE(output[i - delay_samples] * decay)
     return output
+
+
+def spatial_reverb_delay(data, fs=STANDARD_SAMPLE_RATE, wet=0.2):
+    """Create warm early reflections, pre-delay, and a diffused reverb tail."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    if len(data) < 16:
+        return data
+
+    reflections = np.zeros(len(data), dtype=INTERNAL_DTYPE)
+    for delay_ms, gain in (
+        (17.0, 0.22),
+        (29.0, 0.16),
+        (43.0, 0.12),
+        (67.0, 0.085),
+        (97.0, 0.055),
+    ):
+        delay_samples = max(1, int(delay_ms * fs / 1000.0))
+        if delay_samples < len(data):
+            reflections[delay_samples:] += data[:-delay_samples] * INTERNAL_DTYPE(gain)
+
+    diffused_tail = body_reverb(
+        reflections,
+        delay_ms=31.0,
+        decay=0.24,
+        fs=fs,
+    )
+    wet_signal = lowpass_filter(
+        reflections * INTERNAL_DTYPE(0.65) + diffused_tail * INTERNAL_DTYPE(0.35),
+        cutoff=8500.0,
+        fs=fs,
+    )
+    wet = INTERNAL_DTYPE(wet)
+    return np.asarray(
+        data * (INTERNAL_DTYPE(1.0) - wet * INTERNAL_DTYPE(0.35))
+        + wet_signal * wet,
+        dtype=INTERNAL_DTYPE,
+    )
 
 
 def smooth_adsr(
@@ -494,7 +584,41 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
         phase = np.cumsum(INTERNAL_DTYPE(freq) * vibrato) / INTERNAL_DTYPE(fs)
         saw = INTERNAL_DTYPE(2.0) * (phase % INTERNAL_DTYPE(1.0)) - INTERNAL_DTYPE(1.0)
         bow_env = smooth_adsr(n_samples, fs, attack_sec=0.055, decay_sec=0.12, sustain_level=0.84, release_sec=0.2)
-        return lowpass_filter(saw * bow_env, cutoff=2900, fs=fs)
+        return resonant_lowpass_filter(
+            saw * bow_env,
+            cutoff=2900.0,
+            resonance=0.08,
+            fs=fs,
+        )
+
+    elif any(
+        voice in inst
+        for voice in ["Synth", "Pluck", "Bell", "Sampler", "Vocoder"]
+    ):
+        vibrato = INTERNAL_DTYPE(1.0) + INTERNAL_DTYPE(0.0025) * np.sin(
+            2 * np.pi * 5.0 * t
+        )
+        phase = np.cumsum(INTERNAL_DTYPE(freq) * vibrato) / INTERNAL_DTYPE(fs)
+        phase_cycle = phase % INTERNAL_DTYPE(1.0)
+        saw = INTERNAL_DTYPE(2.0) * phase_cycle - INTERNAL_DTYPE(1.0)
+        triangle = INTERNAL_DTYPE(2.0) * np.abs(
+            INTERNAL_DTYPE(2.0) * phase_cycle - INTERNAL_DTYPE(1.0)
+        ) - INTERNAL_DTYPE(1.0)
+        shimmer = np.sin(2 * np.pi * phase * 2.0)
+        organic_wave = (
+            INTERNAL_DTYPE(0.48) * saw
+            + INTERNAL_DTYPE(0.38) * triangle
+            + INTERNAL_DTYPE(0.14) * shimmer
+        )
+        decay = INTERNAL_DTYPE(4.2 if "Pluck" in inst or "Bell" in inst else 2.2)
+        voice_env = np.exp(-decay * t)
+        cutoff = 5200.0 if "Bell" in inst else 6800.0
+        return resonant_lowpass_filter(
+            organic_wave * voice_env,
+            cutoff=cutoff,
+            resonance=0.14,
+            fs=fs,
+        )
 
     elif any(b in inst for b in ["808", "Sub Bass", "Bass Synth"]):
         start_freq = max(INTERNAL_DTYPE(freq), INTERNAL_DTYPE(32.7))
@@ -511,7 +635,12 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
             + 0.45 * np.sin(2 * np.pi * freq * 2 * t) * np.exp(-4.5 * t)
             + 0.2 * np.sin(2 * np.pi * freq * 3 * t) * np.exp(-7.0 * t)
         )
-        return np.asarray(harmonics, dtype=INTERNAL_DTYPE)
+        return resonant_lowpass_filter(
+            harmonics,
+            cutoff=6200.0,
+            resonance=0.06,
+            fs=fs,
+        )
 
     elif any(
         d in inst
@@ -605,7 +734,22 @@ def _mutate_steps(pattern, rng, add_probability=0.08, remove_probability=0.03):
     return mutated
 
 
-def _event(instrument, frequency, start_sec, length_sec, gain):
+def _event(
+    instrument,
+    frequency,
+    start_sec,
+    length_sec,
+    gain,
+    rng=None,
+    timing_jitter=0.0,
+    velocity_jitter=0.0,
+):
+    if rng is not None:
+        start_sec += rng.uniform(-timing_jitter, timing_jitter)
+        gain *= rng.uniform(
+            max(0.0, 1.0 - velocity_jitter),
+            1.0 + velocity_jitter,
+        )
     return (
         instrument,
         INTERNAL_DTYPE(frequency),
@@ -650,34 +794,111 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
             start = bar_start + INTERNAL_DTYPE(step) * step_sec
             if step % 2:
                 start += swing * step_sec
+            timing_jitter = min(0.008, float(step_sec) * 0.04)
             if patterns["kick"][step]:
-                events.append(_event("Punchy Kick", 55.0, start, 0.26, 0.62))
+                events.append(
+                    _event(
+                        "Punchy Kick",
+                        55.0,
+                        start,
+                        0.26,
+                        0.62,
+                        rng=rng,
+                        timing_jitter=timing_jitter,
+                        velocity_jitter=0.1,
+                    )
+                )
             if patterns["snare"][step]:
                 snare_name = "Crisp Clap" if style == "Modern Pop / R&B" else "Crisp Snare"
-                events.append(_event(snare_name, 180.0, start, 0.22, 0.38))
+                events.append(
+                    _event(
+                        snare_name,
+                        180.0,
+                        start,
+                        0.22,
+                        0.38,
+                        rng=rng,
+                        timing_jitter=timing_jitter,
+                        velocity_jitter=0.12,
+                    )
+                )
             if patterns["hat"][step]:
-                events.append(_event("Closed Hi-Hat", 5000.0, start, 0.075, 0.2))
+                events.append(
+                    _event(
+                        "Closed Hi-Hat",
+                        5000.0,
+                        start,
+                        0.075,
+                        0.2,
+                        rng=rng,
+                        timing_jitter=timing_jitter,
+                        velocity_jitter=0.18,
+                    )
+                )
             if patterns["open_hat"][step]:
-                events.append(_event("Open Hat", 6500.0, start, 0.2, 0.22))
+                events.append(
+                    _event(
+                        "Open Hat",
+                        6500.0,
+                        start,
+                        0.2,
+                        0.22,
+                        rng=rng,
+                        timing_jitter=timing_jitter,
+                        velocity_jitter=0.16,
+                    )
+                )
             if patterns["808"][step]:
-                events.append(_event("808 Bass", bass_frequency, start, 0.55, 0.48))
+                events.append(
+                    _event(
+                        "808 Bass",
+                        bass_frequency,
+                        start,
+                        0.55,
+                        0.48,
+                        rng=rng,
+                        timing_jitter=timing_jitter * 0.5,
+                        velocity_jitter=0.08,
+                    )
+                )
 
         if style in ("Hip-Hop / Trap", "Modern Drill") and rng.random() < 0.9:
             roll_start = rng.choice((3, 7, 11, 15))
             for roll_step in range(3):
                 start = bar_start + (roll_start + roll_step * 0.5) * step_sec
-                events.append(_event("Closed Hi-Hat", 5600.0, start, 0.045, 0.14))
+                events.append(
+                    _event(
+                        "Closed Hi-Hat",
+                        5600.0,
+                        start,
+                        0.045,
+                        0.14,
+                        rng=rng,
+                        timing_jitter=min(0.003, float(step_sec) * 0.02),
+                        velocity_jitter=0.2,
+                    )
+                )
 
     return events
 
 
-def generate_melody_events(style, bpm, bars, rng, root_midi, scale_name, progression):
-    """Generate chord stabs and a short scale-constrained lead motif."""
+def generate_melody_events(
+    style,
+    bpm,
+    bars,
+    rng,
+    root_midi,
+    scale_name,
+    progression,
+    progression_name="",
+):
+    """Generate key-aligned harmony plus alternating lead calls and responses."""
     profile = BEAT_STYLE_PROFILES[style]
     intervals = SCALE_INTERVALS[scale_name]
     bar_sec = INTERNAL_DTYPE(60.0 / bpm * 4.0)
     eighth_sec = bar_sec / INTERNAL_DTYPE(8.0)
-    melody_instrument = rng.choice(profile["melody_instruments"])
+    lead_instrument = rng.choice(profile["melody_instruments"])
+    harmony_instrument = "Piano" if style == "Boom Bap" else "Electric Piano"
     events = []
 
     for bar in range(bars):
@@ -688,35 +909,46 @@ def generate_melody_events(style, bpm, bars, rng, root_midi, scale_name, progres
             chord_pitch = _scale_pitch(root_midi, intervals, degree, octave_offset=1)
             events.append(
                 _event(
-                    "Piano" if style == "Boom Bap" else "Electric Piano",
+                    harmony_instrument,
                     midi_to_frequency(chord_pitch),
                     bar_start,
                     bar_sec * INTERNAL_DTYPE(0.9),
                     INTERNAL_DTYPE(0.13 if chord_index == 0 else 0.09),
+                    rng=rng,
+                    timing_jitter=min(0.008, float(bar_sec) * 0.012),
+                    velocity_jitter=0.08,
                 )
             )
 
-        motif_length = rng.choice((4, 6, 8))
-        for slot in range(motif_length):
-            if rng.random() > (0.78 if style == "Lofi Beats" else 0.9):
-                continue
-            degree_offset = rng.choice((0, 1, 2, 4, 5, 7))
+        is_call = bar % 2 == 0
+        motif = rng.choice(MELODY_MOTIFS if is_call else RESPONSE_MOTIFS)
+        phrase_instrument = lead_instrument if is_call else harmony_instrument
+        phrase_octave = 2 if is_call else 1
+        phrase_spacing = eighth_sec if is_call else bar_sec / INTERNAL_DTYPE(4.0)
+        for slot, motif_degree in enumerate(motif):
+            degree_offset = int(motif_degree)
             pitch = _scale_pitch(
                 root_midi,
                 intervals,
                 chord_degree + degree_offset,
-                octave_offset=2,
+                octave_offset=phrase_octave,
             )
-            start = bar_start + INTERNAL_DTYPE(slot) * eighth_sec
+            start = bar_start + INTERNAL_DTYPE(slot) * phrase_spacing
             if slot % 2:
-                start += INTERNAL_DTYPE(profile["swing"]) * eighth_sec
+                start += INTERNAL_DTYPE(profile["swing"]) * phrase_spacing
             events.append(
                 _event(
-                    melody_instrument,
+                    phrase_instrument,
                     midi_to_frequency(pitch),
                     start,
-                    rng.choice((0.16, 0.22, 0.3)),
-                    INTERNAL_DTYPE(0.16 if slot else 0.2),
+                    0.24 if is_call else 0.3,
+                    INTERNAL_DTYPE(0.18 if is_call else 0.13),
+                    rng=rng,
+                    timing_jitter=min(
+                        0.012,
+                        float(phrase_spacing) * 0.035,
+                    ),
+                    velocity_jitter=0.14,
                 )
             )
 
@@ -724,21 +956,20 @@ def generate_melody_events(style, bpm, bars, rng, root_midi, scale_name, progres
 
 
 def generate_modern_beat_plan(style, duration_sec, rng):
-    """Return an unlimited, randomized beat/melody event plan and metadata."""
+    """Return a key-aware, emotionally coherent beat/melody event plan."""
     profile = BEAT_STYLE_PROFILES[style]
     bpm = rng.randint(*profile["bpm_range"])
     bars = max(1, int(np.ceil(duration_sec / (60.0 / bpm * 4.0))))
     scale_name = rng.choice(profile["scales"])
     intervals = SCALE_INTERVALS[scale_name]
     root_midi = rng.choice((36, 38, 40, 41, 43, 45, 47))
-    progression = rng.choice(
-        (
-            (0, 5, 3, 4),
-            (0, 3, 5, 4),
-            (0, 4, 5, 3),
-            (0, 2, 5, 4),
-        )
+    tonal_mode = (
+        "Major"
+        if scale_name in ("Major", "Dorian")
+        or (scale_name == "Pentatonic" and rng.random() > 0.5)
+        else "Minor"
     )
+    progression_name, progression = rng.choice(CHORD_PROGRESSIONS[tonal_mode])
     bass_midi_by_bar = [
         _scale_pitch(root_midi, intervals, progression[bar % len(progression)])
         for bar in range(bars)
@@ -759,6 +990,7 @@ def generate_modern_beat_plan(style, duration_sec, rng):
             root_midi,
             scale_name,
             progression,
+            progression_name=progression_name,
         )
     )
     return {
@@ -766,6 +998,8 @@ def generate_modern_beat_plan(style, duration_sec, rng):
         "bpm": bpm,
         "bars": bars,
         "scale": scale_name,
+        "key_mode": tonal_mode,
+        "progression_name": progression_name,
         "root_midi": root_midi,
     }
 
@@ -786,6 +1020,21 @@ def _add_note_to_layer(layer, instrument, frequency, start_sec, length_sec, gain
         layer[start_index : start_index + available] += (
             sound[:available] * INTERNAL_DTYPE(gain)
         )
+
+
+def _needs_spatial_depth(instrument):
+    return not any(
+        marker in instrument
+        for marker in [
+            "Kick",
+            "Snare",
+            "Clap",
+            "Hat",
+            "Drum",
+            "808",
+            "Bass",
+        ]
+    )
 
 
 def generate_track(
@@ -852,6 +1101,14 @@ def generate_track(
                 length_sec,
                 gain,
                 fs,
+            )
+
+    for instrument, layer in list(rendered_layers.items()):
+        if _needs_spatial_depth(instrument):
+            rendered_layers[instrument] = spatial_reverb_delay(
+                layer,
+                fs=fs,
+                wet=0.2,
             )
 
     for layer in rendered_layers.values():
