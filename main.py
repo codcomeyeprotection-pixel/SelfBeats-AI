@@ -1,5 +1,13 @@
-import io, time, random, numpy as np, scipy.io.wavfile as wav, scipy.signal as signal, streamlit as st
-from pydub import AudioSegment
+import io
+import random
+import subprocess
+import time
+
+import imageio_ffmpeg
+import numpy as np
+import scipy.signal as signal
+import soundfile as sf
+import streamlit as st
 
 st.set_page_config(page_title="SelfBeats AI", page_icon="logo.png", layout="wide")
 
@@ -167,19 +175,42 @@ def normalize_master(data, target_peak=MASTER_TARGET_PEAK):
 
 
 def wav_to_mp3(wav_bytes, bitrate="320k"):
-    """Convert the rendered WAV bytes to a widely compatible MP3 download."""
+    """Encode WAV bytes to MP3 through an in-memory ffmpeg pipe."""
     try:
-        audio_segment = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
-        mp3_io = io.BytesIO()
-        audio_segment.export(
-            mp3_io,
-            format="mp3",
-            bitrate=bitrate,
-            parameters=["-ar", str(STANDARD_SAMPLE_RATE)],
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        result = subprocess.run(
+            [
+                ffmpeg_exe,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+                "-vn",
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                bitrate,
+                "-ar",
+                str(STANDARD_SAMPLE_RATE),
+                "-f",
+                "mp3",
+                "pipe:1",
+            ],
+            input=wav_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
         )
     except Exception as exc:
         raise RuntimeError("MP3 conversion is unavailable in this environment.") from exc
-    return mp3_io.getvalue()
+
+    if result.returncode != 0 or not result.stdout:
+        error_message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"MP3 conversion failed: {error_message or 'ffmpeg returned no audio.'}")
+    return result.stdout
 
 
 def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
@@ -362,10 +393,8 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
     master = band_limit_filter(master, fs=fs)
     master = soft_limiter(master, threshold=MASTER_LIMITER_THRESHOLD, drive=1.1)
     master = normalize_master(master)
-    audio_int16 = np.rint(master * INTERNAL_DTYPE(32767)).astype(np.int16)
-
     byte_io = io.BytesIO()
-    wav.write(byte_io, fs, audio_int16)
+    sf.write(byte_io, master, fs, format="WAV", subtype="PCM_16")
     return byte_io.getvalue(), inst_list
 
 

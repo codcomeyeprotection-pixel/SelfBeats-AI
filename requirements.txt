@@ -3,9 +3,7 @@ requests
 gradio_client
 huggingface_hub
 gTTS
-pydub
 scipy
 numpy
-numpy
-scipy
-streamlit
+soundfile
+imageio-ffmpeg

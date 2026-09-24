@@ -7,7 +7,7 @@ run = ["sh", "-c", "streamlit run main.py --server.port 5000 --server.address 0.
 
 [nix]
 channel = "stable-25_05"
-packages = ["ffmpeg-full", "libxcrypt", "pkg-config", "xsimd"]
+packages = ["ffmpeg-full", "libsndfile", "libxcrypt", "pkg-config", "xsimd"]
 
 [[ports]]
 localPort = 5000
