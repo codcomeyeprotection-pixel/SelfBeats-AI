@@ -17,10 +17,8 @@ INTERNAL_DTYPE = np.float64
 MIN_ENVELOPE_TIME_SEC = 0.005
 MASTER_HEADROOM_DB = -3.0
 MASTER_HEADROOM_GAIN = np.float64(10 ** (MASTER_HEADROOM_DB / 20.0))
-MASTER_LIMITER_DBFS = -1.0
+MASTER_LIMITER_DBFS = -1.5
 MASTER_LIMITER_THRESHOLD = np.float64(10 ** (MASTER_LIMITER_DBFS / 20.0))
-MASTER_TARGET_DBFS = -1.0
-MASTER_TARGET_PEAK = np.float64(10 ** (MASTER_TARGET_DBFS / 20.0))
 
 logo_col, title_col = st.columns([1, 8])
 with logo_col:
@@ -169,14 +167,23 @@ def soft_limiter(data, threshold=MASTER_LIMITER_THRESHOLD, drive=1.25):
     return np.clip(limited, -threshold, threshold).astype(INTERNAL_DTYPE)
 
 
-def normalize_master(data, target_peak=MASTER_TARGET_PEAK):
-    """Peak-normalize the float64 master to the requested dBFS headroom."""
+def measure_signal(data):
+    """Return float64 RMS and peak measurements without changing the signal."""
     data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    if data.size == 0:
+        return INTERNAL_DTYPE(0.0), INTERNAL_DTYPE(0.0)
+    rms = np.sqrt(np.mean(np.square(data), dtype=INTERNAL_DTYPE))
     peak = np.max(np.abs(data))
-    if peak <= 0:
-        return data
-    normalized = data * (INTERNAL_DTYPE(target_peak) / INTERNAL_DTYPE(peak))
-    return np.clip(normalized, -1.0, 1.0).astype(INTERNAL_DTYPE)
+    return INTERNAL_DTYPE(rms), INTERNAL_DTYPE(peak)
+
+
+def peak_guard(data, ceiling=MASTER_LIMITER_THRESHOLD):
+    """Only attenuate peaks above the ceiling; never add makeup gain."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    peak = np.max(np.abs(data)) if data.size else INTERNAL_DTYPE(0.0)
+    if peak > ceiling:
+        data = data * (INTERNAL_DTYPE(ceiling) / INTERNAL_DTYPE(peak))
+    return np.clip(data, -ceiling, ceiling).astype(INTERNAL_DTYPE)
 
 
 def wav_to_mp3(wav_bytes, bitrate="320k"):
@@ -357,6 +364,8 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
     total_samples = int(duration * fs)
     total_signal = np.zeros(total_samples, dtype=INTERNAL_DTYPE)
     number_of_active_instruments = 0
+    layer_rms_values = []
+    layer_peak_values = []
 
     scale = [130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, 261.63]
     bpm = random.randint(88, 128)
@@ -384,16 +393,41 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
                 avail = min(len(sound), total_samples - i)
                 layer[i : i + avail] += sound[:avail] * INTERNAL_DTYPE(0.35)
 
-        if np.any(np.abs(layer) > 0.0):
+        layer_rms, layer_peak = measure_signal(layer)
+        if layer_peak > 0.0:
             total_signal += layer
             number_of_active_instruments += 1
+            layer_rms_values.append(layer_rms)
+            layer_peak_values.append(layer_peak)
 
-    # Reduce summed energy as channels are added to preserve dynamic headroom.
-    channel_attenuation = max(
-        1.0,
-        np.sqrt(INTERNAL_DTYPE(number_of_active_instruments)) * INTERNAL_DTYPE(1.5),
+    # Estimate mix energy from each layer before the layers are summed.
+    if layer_rms_values:
+        pre_mix_rms = np.sqrt(
+            np.sum(
+                np.square(np.asarray(layer_rms_values, dtype=INTERNAL_DTYPE)),
+                dtype=INTERNAL_DTYPE,
+            )
+        )
+        pre_mix_peak = np.max(
+            np.asarray(layer_peak_values, dtype=INTERNAL_DTYPE)
+        )
+    else:
+        pre_mix_rms = INTERNAL_DTYPE(0.0)
+        pre_mix_peak = INTERNAL_DTYPE(0.0)
+    active_track_divisor = max(
+        INTERNAL_DTYPE(1.0),
+        INTERNAL_DTYPE(number_of_active_instruments) * INTERNAL_DTYPE(0.7),
     )
-    master_signal = total_signal / channel_attenuation
+    rms_guard = max(INTERNAL_DTYPE(1.0), pre_mix_rms / INTERNAL_DTYPE(0.5))
+    peak_guard_scale = max(INTERNAL_DTYPE(1.0), pre_mix_peak / MASTER_LIMITER_THRESHOLD)
+
+    # Reduce the mix by 0.5 and by active-track count before saturation.
+    master_signal = (
+        total_signal
+        * INTERNAL_DTYPE(0.5)
+        / active_track_divisor
+        / max(rms_guard, peak_guard_scale)
+    )
     master_signal *= MASTER_HEADROOM_GAIN
 
     if any(
@@ -410,16 +444,19 @@ def generate_track(inst_list, fx_list, is_auto=False, duration=15):
     master_signal = band_limit_filter(
         master_signal,
         fs=fs,
-        low_cutoff=35.0,
-        high_cutoff=15000.0,
+        low_cutoff=30.0,
+        high_cutoff=14000.0,
     )
-    master_signal = np.tanh(np.asarray(master_signal, dtype=INTERNAL_DTYPE))
-    master = soft_limiter(
+    master_signal = np.tanh(
+        np.asarray(master_signal, dtype=INTERNAL_DTYPE) * INTERNAL_DTYPE(0.8)
+    )
+    master_signal = band_limit_filter(
         master_signal,
-        threshold=MASTER_LIMITER_THRESHOLD,
-        drive=1.0,
+        fs=fs,
+        low_cutoff=30.0,
+        high_cutoff=14000.0,
     )
-    master = normalize_master(master, target_peak=MASTER_LIMITER_THRESHOLD)
+    master = peak_guard(master_signal, ceiling=MASTER_LIMITER_THRESHOLD)
     byte_io = io.BytesIO()
     sf.write(byte_io, master, fs, format="WAV", subtype="PCM_16")
     return byte_io.getvalue(), inst_list
