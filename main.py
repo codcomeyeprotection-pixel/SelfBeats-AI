@@ -633,6 +633,20 @@ def warm_tube_saturation(data, drive=1.35, mix=0.2):
     )
 
 
+def soft_tape_warmth(data, drive=1.08, mix=0.14):
+    """Apply gentle tape-style rounding and low-frequency warmth."""
+    data = np.asarray(data, dtype=INTERNAL_DTYPE)
+    drive = INTERNAL_DTYPE(max(1.0, drive))
+    rounded = np.tanh(data * drive) / np.tanh(drive)
+    low = lowpass_filter(data, cutoff=420.0)
+    warmed = rounded + low * INTERNAL_DTYPE(0.025)
+    return np.asarray(
+        data * (INTERNAL_DTYPE(1.0) - INTERNAL_DTYPE(mix))
+        + warmed * INTERNAL_DTYPE(mix),
+        dtype=INTERNAL_DTYPE,
+    )
+
+
 def stereo_imager(data, fs=STANDARD_SAMPLE_RATE, width=0.58):
     """Create a mono-compatible stereo field while keeping bass centered."""
     data = np.asarray(data, dtype=INTERNAL_DTYPE)
@@ -715,6 +729,73 @@ def peak_normalize(data, target_peak=MASTER_OUTPUT_PEAK):
     return np.clip(normalized, -1.0, 1.0).astype(INTERNAL_DTYPE)
 
 
+def drifting_phase(freq, t, fs, drift_depth=0.002):
+    """Generate a gently detuned phase trajectory instead of a clock-perfect pitch."""
+    drift = (
+        INTERNAL_DTYPE(1.0)
+        + INTERNAL_DTYPE(drift_depth) * (
+            INTERNAL_DTYPE(0.58) * np.sin(2 * np.pi * 0.37 * t)
+            + INTERNAL_DTYPE(0.42) * np.sin(2 * np.pi * 0.71 * t + 0.8)
+        )
+    )
+    return np.cumsum(INTERNAL_DTYPE(freq) * drift) / INTERNAL_DTYPE(fs)
+
+
+def layered_harmonic_wavetable(phase, partials):
+    """Build an organic wavetable from weighted acoustic-style harmonics."""
+    phase = np.asarray(phase, dtype=INTERNAL_DTYPE)
+    waveform = np.zeros(len(phase), dtype=INTERNAL_DTYPE)
+    total_weight = INTERNAL_DTYPE(0.0)
+    for harmonic, amplitude, phase_offset in partials:
+        amplitude = INTERNAL_DTYPE(amplitude)
+        waveform += amplitude * np.sin(
+            2 * np.pi * phase * INTERNAL_DTYPE(harmonic)
+            + INTERNAL_DTYPE(phase_offset)
+        )
+        total_weight += abs(amplitude)
+    if total_weight > 0.0:
+        waveform /= total_weight
+    return np.asarray(waveform, dtype=INTERNAL_DTYPE)
+
+
+def natural_decay_envelope(
+    n_samples,
+    fs=STANDARD_SAMPLE_RATE,
+    decay_sec=0.8,
+    attack_sec=0.012,
+    release_sec=0.22,
+):
+    """Shape a voice with acoustic onset, damping, and a longer natural release."""
+    if n_samples <= 0:
+        return np.zeros(0, dtype=INTERNAL_DTYPE)
+    t = np.arange(n_samples, dtype=INTERNAL_DTYPE) / INTERNAL_DTYPE(fs)
+    envelope = np.exp(-t / INTERNAL_DTYPE(max(0.05, decay_sec)))
+    attack_samples = min(max(1, int(attack_sec * fs)), max(1, n_samples // 4))
+    if attack_samples:
+        attack_phase = np.linspace(
+            0.0,
+            np.pi / 2,
+            attack_samples,
+            dtype=INTERNAL_DTYPE,
+        )
+        envelope[:attack_samples] *= np.sin(attack_phase) ** 2
+    release_samples = min(
+        max(1, int(release_sec * fs)),
+        max(1, n_samples // 3),
+    )
+    if release_samples:
+        release_phase = np.linspace(
+            0.0,
+            np.pi / 2,
+            release_samples,
+            dtype=INTERNAL_DTYPE,
+        )
+        envelope[-release_samples:] *= np.cos(release_phase) ** 2
+    envelope[0] = 0.0
+    envelope[-1] = 0.0
+    return np.asarray(envelope, dtype=INTERNAL_DTYPE)
+
+
 def wav_to_mp3(wav_bytes, bitrate="320k"):
     """Encode WAV bytes to MP3 through an in-memory ffmpeg pipe."""
     try:
@@ -773,13 +854,29 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
             "French Horn",
         ]
     ):
-        vibrato = 1.0 + INTERNAL_DTYPE(0.009) * np.sin(2 * np.pi * 5.5 * t)
+        phase = drifting_phase(freq, t, fs, drift_depth=0.002)
         breath = (np.random.rand(n_samples).astype(INTERNAL_DTYPE) - 0.5) * INTERNAL_DTYPE(0.06)
-        phase = np.cumsum(INTERNAL_DTYPE(freq) * vibrato) / INTERNAL_DTYPE(fs)
-        core = np.sin(2 * np.pi * phase) + INTERNAL_DTYPE(0.3) * np.sin(
-            2 * np.pi * 2 * phase
+        is_brass = any(
+            marker in inst
+            for marker in ["Trumpet", "Trombone", "Brass Section", "French Horn"]
         )
-        env = smooth_adsr(n_samples, fs, attack_sec=0.035, decay_sec=0.09, sustain_level=0.76, release_sec=0.16)
+        core = layered_harmonic_wavetable(
+            phase,
+            (
+                (1, 0.82, 0.0),
+                (2, 0.26 if is_brass else 0.2, 0.18),
+                (3, 0.14 if is_brass else 0.1, -0.12),
+                (4, 0.08, 0.27),
+                (5, 0.04, -0.2),
+            ),
+        )
+        env = natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=1.35 if is_brass else 1.0,
+            attack_sec=0.035,
+            release_sec=0.3,
+        )
         return lowpass_filter((core + breath) * env, cutoff=4200, fs=fs)
 
     elif any(p in inst for p in ["Tabla", "Dholak", "Cajón", "Bongos", "Congas"]):
@@ -796,32 +893,77 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
             sound[i] = buf[0]
             avg = INTERNAL_DTYPE(0.5 * (buf[0] + buf[1]) * 0.982)
             buf = np.append(buf[1:], avg)
-        return sound
+        body = layered_harmonic_wavetable(
+            drifting_phase(freq, t, fs, drift_depth=0.002),
+            (
+                (1, 0.92, 0.0),
+                (2, 0.22, 0.15),
+                (3, 0.11, -0.12),
+                (4, 0.045, 0.26),
+            ),
+        )
+        damp = natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=0.62,
+            attack_sec=0.004,
+            release_sec=0.18,
+        )
+        nylon_mix = sound * INTERNAL_DTYPE(0.82) + body * damp * INTERNAL_DTYPE(0.18)
+        return resonant_lowpass_filter(
+            nylon_mix * damp,
+            cutoff=5200.0,
+            resonance=0.07,
+            fs=fs,
+        )
 
     elif any(
         s in inst
         for s in ["Violin", "Viola", "Cello", "Double Bass", "String Ensemble"]
     ):
-        vibrato = 1.0 + INTERNAL_DTYPE(0.012) * np.sin(2 * np.pi * 6 * t)
-        phase = np.cumsum(INTERNAL_DTYPE(freq) * vibrato) / INTERNAL_DTYPE(fs)
-        saw = INTERNAL_DTYPE(2.0) * (phase % INTERNAL_DTYPE(1.0)) - INTERNAL_DTYPE(1.0)
-        bow_env = smooth_adsr(n_samples, fs, attack_sec=0.055, decay_sec=0.12, sustain_level=0.84, release_sec=0.2)
+        phase = drifting_phase(freq, t, fs, drift_depth=0.002)
+        bow_wave = layered_harmonic_wavetable(
+            phase,
+            (
+                (1, 0.78, 0.0),
+                (2, 0.24, 0.12),
+                (3, 0.12, -0.08),
+                (4, 0.06, 0.2),
+                (5, 0.035, -0.18),
+            ),
+        )
+        bow_env = natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=2.4,
+            attack_sec=0.055,
+            release_sec=0.34,
+        )
         return resonant_lowpass_filter(
-            saw * bow_env,
+            bow_wave * bow_env,
             cutoff=2900.0,
             resonance=0.08,
             fs=fs,
         )
 
     elif any(k in inst for k in ["Koto", "Guzheng", "Asian Folk"]):
-        phase = np.cumsum(INTERNAL_DTYPE(freq) * (1.0 + 0.0015 * np.sin(2 * np.pi * 5.2 * t)))
-        phase /= INTERNAL_DTYPE(fs)
-        pluck = (
-            np.sin(2 * np.pi * phase)
-            + INTERNAL_DTYPE(0.34) * np.sin(2 * np.pi * phase * 2.0)
-            + INTERNAL_DTYPE(0.16) * np.sin(2 * np.pi * phase * 3.0)
+        phase = drifting_phase(freq, t, fs, drift_depth=0.002)
+        pluck = layered_harmonic_wavetable(
+            phase,
+            (
+                (1, 1.0, 0.0),
+                (2, 0.34, 0.12),
+                (3, 0.16, -0.14),
+                (4, 0.08, 0.25),
+            ),
         )
-        pluck *= np.exp(-INTERNAL_DTYPE(3.8) * t)
+        pluck *= natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=0.72,
+            attack_sec=0.003,
+            release_sec=0.2,
+        )
         return resonant_lowpass_filter(
             pluck,
             cutoff=5100.0,
@@ -833,23 +975,25 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
         voice in inst
         for voice in ["Synth", "Pluck", "Bell", "Sampler", "Vocoder"]
     ):
-        vibrato = INTERNAL_DTYPE(1.0) + INTERNAL_DTYPE(0.0025) * np.sin(
-            2 * np.pi * 5.0 * t
+        phase = drifting_phase(freq, t, fs, drift_depth=0.002)
+        organic_wave = layered_harmonic_wavetable(
+            phase,
+            (
+                (1, 0.82, 0.0),
+                (2, 0.28, 0.11),
+                (3, 0.16, -0.14),
+                (4, 0.1, 0.22),
+                (5, 0.05, -0.24),
+                (6, 0.025, 0.31),
+            ),
         )
-        phase = np.cumsum(INTERNAL_DTYPE(freq) * vibrato) / INTERNAL_DTYPE(fs)
-        phase_cycle = phase % INTERNAL_DTYPE(1.0)
-        saw = INTERNAL_DTYPE(2.0) * phase_cycle - INTERNAL_DTYPE(1.0)
-        triangle = INTERNAL_DTYPE(2.0) * np.abs(
-            INTERNAL_DTYPE(2.0) * phase_cycle - INTERNAL_DTYPE(1.0)
-        ) - INTERNAL_DTYPE(1.0)
-        shimmer = np.sin(2 * np.pi * phase * 2.0)
-        organic_wave = (
-            INTERNAL_DTYPE(0.48) * saw
-            + INTERNAL_DTYPE(0.38) * triangle
-            + INTERNAL_DTYPE(0.14) * shimmer
+        voice_env = natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=0.48 if "Pluck" in inst or "Bell" in inst else 1.8,
+            attack_sec=0.008 if "Pluck" in inst or "Bell" in inst else 0.025,
+            release_sec=0.24 if "Pluck" in inst or "Bell" in inst else 0.32,
         )
-        decay = INTERNAL_DTYPE(4.2 if "Pluck" in inst or "Bell" in inst else 2.2)
-        voice_env = np.exp(-decay * t)
         cutoff = 5200.0 if "Bell" in inst else 6800.0
         return resonant_lowpass_filter(
             organic_wave * voice_env,
@@ -862,21 +1006,43 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
         start_freq = max(INTERNAL_DTYPE(freq), INTERNAL_DTYPE(32.7))
         pitch_drop = 6.5 if "Log Drum" in inst else 4.5
         pitch = start_freq * np.exp(-INTERNAL_DTYPE(pitch_drop) * t)
-        phase = np.cumsum(pitch) / INTERNAL_DTYPE(fs)
-        sub = np.sin(2 * np.pi * phase)
-        harmonic = INTERNAL_DTYPE(0.16) * np.sin(2 * np.pi * 2 * phase)
-        envelope = np.exp(-INTERNAL_DTYPE(4.6 if "Log Drum" in inst else 2.8) * t)
+        phase = np.cumsum(pitch * (1.0 + INTERNAL_DTYPE(0.002) * np.sin(2 * np.pi * 0.31 * t))) / INTERNAL_DTYPE(fs)
+        sub = layered_harmonic_wavetable(
+            phase,
+            ((1, 1.0, 0.0), (2, 0.16, 0.1), (3, 0.04, -0.18)),
+        )
+        envelope = natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=0.28 if "Log Drum" in inst else 0.8,
+            attack_sec=0.004,
+            release_sec=0.16,
+        )
         return lowpass_filter(
-            (sub + harmonic) * envelope,
+            sub * envelope,
             cutoff=280 if "Log Drum" in inst else 180,
             fs=fs,
         )
 
     elif any(k in inst for k in ["Piano", "Keyboard"]):
-        harmonics = (
-            1.0 * np.sin(2 * np.pi * freq * t) * np.exp(-2.8 * t)
-            + 0.45 * np.sin(2 * np.pi * freq * 2 * t) * np.exp(-4.5 * t)
-            + 0.2 * np.sin(2 * np.pi * freq * 3 * t) * np.exp(-7.0 * t)
+        phase = drifting_phase(freq, t, fs, drift_depth=0.002)
+        harmonics = layered_harmonic_wavetable(
+            phase,
+            (
+                (1, 1.0, 0.0),
+                (2, 0.45, 0.08),
+                (3, 0.2, -0.13),
+                (4, 0.11, 0.21),
+                (5, 0.06, -0.24),
+                (6, 0.03, 0.3),
+            ),
+        )
+        harmonics *= natural_decay_envelope(
+            n_samples,
+            fs,
+            decay_sec=1.15,
+            attack_sec=0.006,
+            release_sec=0.3,
         )
         return resonant_lowpass_filter(
             harmonics,
@@ -929,8 +1095,19 @@ def _synthesize_raw_sound(inst, freq, length_sec, fs=STANDARD_SAMPLE_RATE):
             return (np.random.rand(n_samples).astype(INTERNAL_DTYPE) - 0.5) * np.exp(-decay * t)
 
     else:
+        phase = drifting_phase(freq, t, fs, drift_depth=0.002)
         return np.asarray(
-            np.sin(2 * np.pi * freq * t) * np.exp(-3.5 * t),
+            layered_harmonic_wavetable(
+                phase,
+                ((1, 1.0, 0.0), (2, 0.2, 0.13), (3, 0.08, -0.16)),
+            )
+            * natural_decay_envelope(
+                n_samples,
+                fs,
+                decay_sec=0.9,
+                attack_sec=0.012,
+                release_sec=0.22,
+            ),
             dtype=INTERNAL_DTYPE,
         )
 
@@ -994,13 +1171,22 @@ def _event(
     rng=None,
     timing_jitter=0.0,
     velocity_jitter=0.0,
+    accent=False,
 ):
     if rng is not None:
-        start_sec += rng.uniform(-timing_jitter, timing_jitter)
-        gain *= rng.uniform(
-            max(0.0, 1.0 - velocity_jitter),
-            1.0 + velocity_jitter,
-        )
+        # Keep every note inside a human performance window instead of using
+        # a single quantized timestamp or a free-running random gain.
+        start_sec += rng.uniform(-0.012, 0.018)
+        velocity = rng.uniform(0.65, 0.98)
+        if velocity_jitter:
+            velocity *= rng.uniform(
+                max(0.96, 1.0 - velocity_jitter * 0.35),
+                min(1.04, 1.0 + velocity_jitter * 0.35),
+            )
+        if accent:
+            velocity = min(0.98, velocity + rng.uniform(0.025, 0.06))
+        velocity = max(0.65, min(0.98, velocity))
+        gain *= velocity
     return (
         instrument,
         INTERNAL_DTYPE(frequency),
@@ -1087,6 +1273,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter,
                         velocity_jitter=0.04,
+                        accent=(step == 0),
                     )
                 )
             if patterns["snare"][step]:
@@ -1101,6 +1288,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter,
                         velocity_jitter=0.05,
+                        accent=(step == 0),
                     )
                 )
             if patterns["hat"][step]:
@@ -1114,6 +1302,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter,
                         velocity_jitter=0.06,
+                        accent=(step == 0),
                     )
                 )
             if patterns["open_hat"][step]:
@@ -1127,6 +1316,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter,
                         velocity_jitter=0.06,
+                        accent=(step == 0),
                     )
                 )
             if groove_texture == "afro" and patterns["hat"][step]:
@@ -1140,6 +1330,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=0.002,
                         velocity_jitter=0.05,
+                        accent=(step == 0),
                     )
                 )
             if groove_texture == "afro" and patterns["808"][step] and step in (0, 7, 12):
@@ -1153,6 +1344,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter * 0.5,
                         velocity_jitter=0.04,
+                        accent=(step == 0),
                     )
                 )
             if groove_texture in ("acoustic", "latin") and patterns["kick"][step]:
@@ -1166,6 +1358,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter,
                         velocity_jitter=0.05,
+                        accent=(step == 0),
                     )
                 )
             if patterns["808"][step]:
@@ -1179,6 +1372,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=timing_jitter * 0.5,
                         velocity_jitter=0.03,
+                        accent=(step == 0),
                     )
                 )
 
@@ -1196,6 +1390,7 @@ def generate_beat_events(style, bpm, bars, rng, bass_midi_by_bar):
                         rng=rng,
                         timing_jitter=min(0.003, float(step_sec) * 0.02),
                         velocity_jitter=0.08,
+                        accent=False,
                     )
                 )
 
@@ -1250,6 +1445,7 @@ def generate_melody_events(
                     rng=rng,
                     timing_jitter=min(0.008, float(bar_sec) * 0.012),
                     velocity_jitter=0.04,
+                    accent=(chord_index == 0),
                 )
             )
 
@@ -1288,6 +1484,7 @@ def generate_melody_events(
                         float(phrase_spacing) * 0.035,
                     ),
                     velocity_jitter=0.05,
+                    accent=(slot == 0),
                 )
             )
 
@@ -1438,15 +1635,22 @@ def generate_track(
             * fs
         )
         step = max(1, step)
+        bar_samples = max(1, int(beat_sec * 4.0 * fs))
 
         for i in range(0, total_samples, step):
             if rng.random() > 0.2:
                 freq = rng.choice([130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94, 261.63])
                 n_len = rng.choice([0.4, 0.8, 1.2])
                 sound = synthesize_hifi_sound(inst, freq, n_len, fs)
-
-                avail = min(len(sound), total_samples - i)
-                layer[i : i + avail] += sound[:avail] * INTERNAL_DTYPE(0.35)
+                note_start = i + int(round(rng.uniform(-0.012, 0.018) * fs))
+                note_start = max(0, min(total_samples - 1, note_start))
+                velocity = rng.uniform(0.65, 0.98)
+                if i % bar_samples == 0:
+                    velocity = min(0.98, velocity + rng.uniform(0.025, 0.06))
+                avail = min(len(sound), total_samples - note_start)
+                layer[note_start : note_start + avail] += (
+                    sound[:avail] * INTERNAL_DTYPE(0.35 * velocity)
+                )
 
         rendered_layers[inst] = layer
 
@@ -1490,10 +1694,15 @@ def generate_track(
 
     for instrument, layer in list(rendered_layers.items()):
         if _needs_spatial_depth(instrument):
-            rendered_layers[instrument] = spatial_reverb_delay(
+            spatial_layer = spatial_reverb_delay(
                 layer,
                 fs=fs,
                 wet=0.2,
+            )
+            rendered_layers[instrument] = soft_tape_warmth(
+                spatial_layer,
+                drive=1.06,
+                mix=0.1,
             )
 
     for layer in rendered_layers.values():
@@ -1562,6 +1771,11 @@ def generate_track(
         master_signal,
         drive=1.35,
         mix=0.2,
+    )
+    master_signal = soft_tape_warmth(
+        master_signal,
+        drive=1.08,
+        mix=0.12,
     )
     master_signal = multiband_peak_limiter(
         master_signal,
